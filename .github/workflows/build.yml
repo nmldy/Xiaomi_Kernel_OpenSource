@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout Source
       uses: actions/checkout@v4
@@ -15,11 +15,12 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt update
-        sudo apt install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 cpio
+        # 注意：这里已经将依赖修改为兼容 ubuntu-22.04 的包名
+        sudo apt install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 cpio
 
     - name: Setup Toolchain
       run: |
-        # 使用 GCC 4.9 编译 MTK 4.14 内核是最稳妥的
+        # 使用 GCC 4.9 编译 MTK 4.14 内核
         mkdir -p $HOME/toolchains
         cd $HOME/toolchains
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
@@ -27,13 +28,13 @@ jobs:
         echo "$HOME/toolchains/gcc64/bin" >> $GITHUB_PATH
         echo "$HOME/toolchains/gcc32/bin" >> $GITHUB_PATH
 
-    - name: Modify Defconfig & Inject ReSukiSU
+    - name: Modify Defconfig & Inject KernelSU
       run: |
         # 自动寻找 merlin 或 k68 的 defconfig
         DEFCONFIG=$(find arch/arm64/configs -name "*merlin*defconfig" -o -name "*k68*defconfig" | head -n 1)
         echo "找到配置文件: $DEFCONFIG"
         
-        # 用 scripts/config 安全开启选项（避免冲突）
+        # 用 scripts/config 安全开启选项（避免直接 echo 导致冲突）
         scripts/config --file $DEFCONFIG \
           -e KALLSYMS_ALL \
           -e KPROBES \
@@ -42,6 +43,14 @@ jobs:
         # 集成 KernelSU (使用最后支持非 GKI 的 v0.9.5 版本)
         curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
 
+    - name: Fix GCC 11 Compilation Errors (for Ubuntu 22.04)
+      run: |
+        # 修复 22.04 的新版 GCC 编译老内核必然出现的 yylloc 报错
+        sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.lex.c 2>/dev/null || true
+        sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.l 2>/dev/null || true
+        # 全局关闭 -fno-common 导致的重复定义报错
+        echo "KCFLAGS=-fno-common" >> $GITHUB_ENV
+
     - name: Compile Kernel
       run: |
         export ARCH=arm64
@@ -49,22 +58,28 @@ jobs:
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
         
-        # 获取配置名并编译
         DEFCONFIG_NAME=$(basename $(find arch/arm64/configs -name "*merlin*defconfig" -o -name "*k68*defconfig" | head -n 1) .defconfig)
         
+        # 开始编译
         make O=out ARCH=arm64 $DEFCONFIG_NAME
-        make O=out ARCH=arm64 -j$(nproc)
+        make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log
 
     - name: Package AnyKernel3
       run: |
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git -b master
         
-        # 修改 AnyKernel3 的设备名，否则 TWRP 会拒绝安装
+        # 修改 AnyKernel3 的设备名，防止 TWRP 拦截
         sed -i 's/device.name1=.*/device.name1=merlin/' AnyKernel3/anykernel.sh
         sed -i 's/device.name2=.*/device.name2=Redmi 10X 4G/' AnyKernel3/anykernel.sh
         
-        # 复制编译产物
-        cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ || cp out/arch/arm64/boot/Image AnyKernel3/
+        # 智能复制编译产物 (MTK 老内核有些是 Image.gz-dtb，有些是 Image.gz)
+        if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+        elif [ -f out/arch/arm64/boot/Image.gz ]; then
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/
+        else
+          cp out/arch/arm64/boot/Image AnyKernel3/
+        fi
         
         cd AnyKernel3
         zip -r9 ../Merlin_Kernel_AnyKernel3.zip *
