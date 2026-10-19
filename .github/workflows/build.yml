@@ -1,4 +1,4 @@
-​ name: Build Merlin Kernel
+name: Build Merlin Kernel
 
 on:
   workflow_dispatch:
@@ -10,65 +10,62 @@ jobs:
     - name: Checkout Source
       uses: actions/checkout@v4
       with:
-        repository: nmldy/Xiaomi_Kernel_OpenSource
-        ref: merlin-r-oss
         fetch-depth: 1
 
     - name: Install Dependencies
       run: |
         sudo apt update
-        sudo apt install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 cpio u-boot-tools
+        sudo apt install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3 cpio
 
-    - name: Setup Toolchains
+    - name: Setup Toolchain
       run: |
-        # 下载 AOSP Clang
-        mkdir -p $HOME/clang && cd $HOME/clang
-        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r383902b.tar.gz -O clang.tar.gz
-        tar -xzf clang.tar.gz && rm clang.tar.gz
-        echo "$HOME/clang/bin" >> $GITHUB_PATH
+        # 使用 GCC 4.9 编译 MTK 4.14 内核是最稳妥的
+        mkdir -p $HOME/toolchains
+        cd $HOME/toolchains
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+        echo "$HOME/toolchains/gcc64/bin" >> $GITHUB_PATH
+        echo "$HOME/toolchains/gcc32/bin" >> $GITHUB_PATH
 
-        # 下载 GCC
-        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git $HOME/gcc64
-        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git $HOME/gcc32
-
-    - name: Inject ReSukiSU
+    - name: Modify Defconfig & Inject ReSukiSU
       run: |
-        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-
-    - name: Modify Defconfig
-      run: |
-        # 寻找并修改 defconfig
-        DEFCONFIG=$(find arch/arm64/configs -name "*merlin*defconfig" | head -n 1)
-        if [ -z "$DEFCONFIG" ]; then
-          DEFCONFIG=$(find arch/arm64/configs -name "*k68*defconfig" | head -n 1)
-        fi
-        echo "Using config: $DEFCONFIG"
-        echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
-        echo "CONFIG_KPROBES=y" >> $DEFCONFIG
-        echo "CONFIG_KALLSYMS_BASE_RELATIVE=y" >> $DEFCONFIG
+        # 自动寻找 merlin 或 k68 的 defconfig
+        DEFCONFIG=$(find arch/arm64/configs -name "*merlin*defconfig" -o -name "*k68*defconfig" | head -n 1)
+        echo "找到配置文件: $DEFCONFIG"
+        
+        # 用 scripts/config 安全开启选项（避免冲突）
+        scripts/config --file $DEFCONFIG \
+          -e KALLSYMS_ALL \
+          -e KPROBES \
+          -e KALLSYMS_BASE_RELATIVE
+        
+        # 集成 KernelSU (使用最后支持非 GKI 的 v0.9.5 版本)
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
 
     - name: Compile Kernel
       run: |
         export ARCH=arm64
         export SUBARCH=arm64
-        export PATH=$HOME/gcc64/bin:$HOME/gcc32/bin:$PATH
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-        export CC=clang
-        export CLANG_TRIPLE=aarch64-linux-gnu-
         
-        DEFCONFIG_NAME=$(basename $(find arch/arm64/configs -name "*merlin*defconfig" | head -n 1) .defconfig)
-        if [ -z "$DEFCONFIG_NAME" ]; then
-          DEFCONFIG_NAME=$(basename $(find arch/arm64/configs -name "*k68*defconfig" | head -n 1) .defconfig)
-        fi
+        # 获取配置名并编译
+        DEFCONFIG_NAME=$(basename $(find arch/arm64/configs -name "*merlin*defconfig" -o -name "*k68*defconfig" | head -n 1) .defconfig)
         
         make O=out ARCH=arm64 $DEFCONFIG_NAME
-        make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log
+        make O=out ARCH=arm64 -j$(nproc)
 
-    - name: Package with AnyKernel3
+    - name: Package AnyKernel3
       run: |
-        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-        cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ 2>/dev/null || cp out/arch/arm64/boot/Image AnyKernel3/
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git -b master
+        
+        # 修改 AnyKernel3 的设备名，否则 TWRP 会拒绝安装
+        sed -i 's/device.name1=.*/device.name1=merlin/' AnyKernel3/anykernel.sh
+        sed -i 's/device.name2=.*/device.name2=Redmi 10X 4G/' AnyKernel3/anykernel.sh
+        
+        # 复制编译产物
+        cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ || cp out/arch/arm64/boot/Image AnyKernel3/
+        
         cd AnyKernel3
         zip -r9 ../Merlin_Kernel_AnyKernel3.zip *
 
